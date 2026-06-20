@@ -1,4 +1,9 @@
 .venv/
+.venv312/
 .idea/
 *.pyc
 __pycache__/
+eval/
+model/
+wandb/
+

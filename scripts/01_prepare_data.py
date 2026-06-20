@@ -1,68 +1,61 @@
 import json
 import os
-import re
+from datasets import load_dataset
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 os.makedirs("data", exist_ok=True)
 
+TRAIN_SIZE = 1000
+TEST_SIZE = 100
+MIN_RATING = 4.5
 
-def is_russian(text):
-    cyrillic = len(re.findall(r'[а-яА-ЯёЁ]', text))
-    total = len(re.findall(r'[а-яА-ЯёЁa-zA-Z]', text))
-    return total > 0 and (cyrillic / total) > 0.5
+print("Loading UltraFeedback (cleaned)...")
+ds = load_dataset("argilla/ultrafeedback-binarized-preferences-cleaned", split="train")
 
+print(f"Total rows: {len(ds)}")
+print(f"Columns: {ds.column_names}")
 
-def to_alpaca(item):
-    conv = item["conversation"]
-    user_text = ""
-    assistant_text = ""
-    for msg in conv:
-        if msg["role"] == "user":
-            user_text = msg["content"]
-        elif msg["role"] == "assistant":
-            assistant_text = msg["content"]
-    return {"instruction": user_text, "response": assistant_text}
+filtered = ds.filter(lambda x: x["chosen-rating"] >= MIN_RATING)
+print(f"After rating >= {MIN_RATING}: {len(filtered)}")
 
+prompts_seen = set()
+train_data, test_data = [], []
 
-print("Loading dataset...")
-from datasets import load_dataset
+for item in filtered:
+    prompt = item["prompt"]
+    if prompt in prompts_seen:
+        continue
+    prompts_seen.add(prompt)
 
-dataset = load_dataset(
-    "ZeroAgency/ru-big-russian-dataset",
-    split="train",
-    streaming=True,
-).select_columns(["topic", "conversation", "overall_score", "question"])
+    chosen_messages = item["chosen"]
+    response = chosen_messages[-1]["content"]
 
-print("Scanning for cooking examples...")
-found = []
-seen_questions = set()
+    record = {
+        "instruction": prompt,
+        "response": response,
+        "rating": item["chosen-rating"],
+        "source": item["source"],
+    }
 
-for batch in dataset.iter(batch_size=1000):
-    topics = batch["topic"]
-    scores = batch["overall_score"]
-    conversations = batch["conversation"]
-    questions = batch["question"]
-
-    for i in range(len(topics)):
-        if topics[i] == "cooking" and scores[i] is not None and scores[i] >= 8:
-            q = questions[i]
-            if q and q not in seen_questions:
-                seen_questions.add(q)
-                text = conversations[i][0]["content"] + " " + conversations[i][1]["content"]
-                if is_russian(text):
-                    found.append({"question": q, "conversation": conversations[i], "overall_score": scores[i]})
-                    if len(found) >= 500:
-                        break
-    if len(found) >= 500:
+    if len(train_data) < TRAIN_SIZE:
+        train_data.append(record)
+    elif len(test_data) < TEST_SIZE:
+        test_data.append(record)
+    else:
         break
 
-print(f"Found {len(found)} examples")
+print(f"Training examples:  {len(train_data)}")
+print(f"Test examples:      {len(test_data)}")
 
-found.sort(key=lambda x: x["overall_score"], reverse=True)
+# Count sources in train
+from collections import Counter
+src_counts = Counter(r["source"] for r in train_data)
+print(f"Train sources: {dict(src_counts)}")
 
-path = "data/train.jsonl"
-with open(path, "w", encoding="utf-8") as f:
-    for item in found[:500]:
-        f.write(json.dumps(to_alpaca(item), ensure_ascii=False) + "\n")
-print(f"  data/train.jsonl ({min(500, len(found))} examples)")
-print("\nDone.")
+for path, data in [("data/train.jsonl", train_data), ("data/test.jsonl", test_data)]:
+    with open(path, "w", encoding="utf-8") as f:
+        for r in data:
+            f.write(json.dumps({"instruction": r["instruction"], "response": r["response"]}, ensure_ascii=False) + "\n")
+    print(f"  Saved {path} ({len(data)} examples)")
+
+print("Done.")
